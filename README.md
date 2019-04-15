@@ -16,7 +16,7 @@ Ansible 2.5.1
 ### Boto
 boto3 (1.9.130)
 
-## Ambiente de Cloud
+### Cloud
 
-O serviço de cloud adotado foi a Amazon AWS  
+Amazon AWS
 
