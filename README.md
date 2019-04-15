@@ -4,3 +4,8 @@ Essa receita ansible foi desenvolvida em resposta do desafio O2B com o objetivo 
 # Ambiente Utilizado
 
 ## Pré Requisitos
+
+### Sistema Operacional
+Linux Mint 19.1
+
+### 
