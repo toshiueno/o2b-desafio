@@ -1,0 +1,279 @@
+---
+
+- hosts: local
+  connection: local
+  tasks:
+    - name: Get Client IP
+      uri:
+        url: http://checkip.amazonaws.com/
+        return_content: yes
+      register: clt_ip
+
+    - name: Create a php group
+      ec2_group:
+        name: php
+        description: A security group for access
+        region: us-west-1
+        rules:
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: 0.0.0.0/0
+        rules_egress:
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+      register: php_group
+      tags:
+        create_php_group
+
+    - name: Create ELB
+      ec2_elb_lb:
+        name: phpbalancer
+        state: present
+        region: us-west-1
+        zones:
+          - us-west-1c
+          - us-west-1b
+        listeners:
+          - protocol: http
+            load_balancer_port: 80
+            instance_port: 80
+      register: elb
+      tags: 
+        create_elb
+    
+    - action:
+        module: ec2_elb_facts
+        region: us-west-1
+      register: elb_facts
+
+    - local_action:
+        module: copy
+        content: "{{ item.dns_name }}"
+        dest: elb_url_app.txt
+      with_items: "{{ elb_facts.elbs }}"
+
+    - name: Generate a EC2 Key
+      ec2_key:
+        name: ec2phpkey
+        region: us-west-1
+      register: ec2_key_result
+      tags:
+        generate_ec2_key
+
+    - name: Save key
+      copy: content="{{ ec2_key_result.key.private_key }}" dest="./ec2phpkey" mode=0600
+      when: ec2_key_result.changed
+      tags:
+        save_key
+
+    - name: Create EC2
+      ec2:
+        key_name: ec2phpkey
+        instance_type: t2.micro
+        image: ami-07d25635f177c4b23
+        region: us-west-1
+        group_id:
+          - "{{ php_group.group_id }}"
+          - "{{ elb.elb.security_group_ids | first }}"
+        wait: yes
+        instance_tags:
+          application: o2bapp
+        exact_count: 1
+        count_tag:
+          application: o2bapp
+      register: ec2_server
+      tags:
+        create_ec2
+      
+    - name: Get EC2 information
+      add_host:
+        hostname: "{{ item.public_ip }}"
+        groupname: ec2_server_ip
+      with_items: "{{ ec2_server.tagged_instances }}"
+      
+    - name: Test server connection
+      wait_for:
+        host: "{{ item.public_ip }}"
+        port: 22
+        timeout: 90
+      with_items: "{{ ec2_server.tagged_instances }}"
+      tags:
+        test_connection
+
+    - name: Include EC2 keys to known hosts
+      known_hosts:
+        name: "{{ item.public_ip }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan -t rsa ' + item.public_ip) }}"
+      with_items: "{{ ec2_server.tagged_instances }}"
+
+    - name: Add pem to local ssh
+      local_action: 
+        module: shell
+           ssh-add ec2phpkey
+    
+    - name: Create a new disk
+      ec2_vol:
+        region: us-west-1
+        instance: "{{ item.id }}"
+        volume_size: 5
+        device_name: /dev/xvdg
+      with_items: "{{ ec2_server.tagged_instances }}"
+      tags:
+        create_disk
+
+- hosts: ec2_server_ip
+  remote_user: centos
+  become: True
+  tasks:
+    - name: Modify Sysctl to disable IPV6
+      shell:
+        echo -e "net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv6.conf.default.disable_ipv6 = 1" | sudo tee -a /etc/sysctl.conf
+
+    - name: Reload values for Sysctl
+      shell:
+        sudo sysctl -p
+
+    - name: Include Address Family to sshd
+      shell:
+        echo "AddressFamily inet" | sudo tee -a /etc/ssh/sshd_config
+
+    - name: Restart SSHD
+      systemd:
+        name: sshd
+        state: restarted
+
+    - name: Install lvm packages
+      yum:
+        name: 'lvm*'
+        state: present
+    
+    - name: Create a VG
+      lvg:
+        vg: vg01
+        pvs: /dev/xvdg
+        state: present
+
+    - name: Create a LV on top of the new VG
+      lvol:
+        vg: vg01
+        lv: lv01
+        size: 100%FREE
+        
+    - name: Format the volume with XFS
+      filesystem:
+        fstype: xfs
+        dev: /dev/mapper/vg01-lv01
+
+    - name: Mount a new fileshare
+      mount:
+        path: /fileshare
+        src: /dev/mapper/vg01-lv01
+        fstype: xfs
+        state: mounted
+
+    - name: Install Nginx
+      yum:
+        name: nginx
+        state: present
+
+    - name: Create default index page
+      copy:
+        dest: /usr/share/nginx/html/index.html
+        content: "O2B - Desafio - {{ ansible_hostname }}"
+
+    - name: Restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: Disable SELinux
+      shell: 
+        sudo setenforce 0 && sudo sed -ri 's/SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config
+
+    - name: Stop auditd
+      shell:
+        sudo service auditd stop 
+
+    - name: Disable auditd
+      shell:
+        sudo systemctl disable auditd
+
+    - name: Install rpm key for elrepo
+      rpm_key:
+        state: present
+        key: https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+
+    - name: Install elrepo
+      yum:
+        name: http://www.elrepo.org/elrepo-release-7.0-3.el7.elrepo.noarch.rpm
+        state: present
+    
+    - name: Install kernel-ml
+      yum:
+        name: kernel-ml
+        enablerepo: elrepo-kernel
+        state: present
+
+    - name: Set grub
+      shell:
+        sudo grub2-set-default 0
+
+    - name: Update Kexec
+      shell:
+        sudo kexec -u
+
+    - name: Change Kernel on Kexec
+      shell:
+        sudo kexec -l /boot/vmlinuz-5.0.7-1.el7.elrepo.x86_64 --initrd=/boot/initramfs-5.0.7-1.el7.elrepo.x86_64.img --reuse-cmdline
+
+    - name: Run kexec
+      shell:
+        sleep 5 && sudo systemctl kexec
+      ignore_errors: true
+      async: 30
+      poll: 0
+      tags:
+        restart_kexec
+
+- hosts: local
+  connection: local
+  tasks:
+    - name: Test server connection again
+      wait_for:
+        delay: 30
+        host: "{{ item.public_ip }}"
+        port: 22
+        timeout: 300
+      with_items: "{{ ec2_server.tagged_instances }}"
+      tags:
+        test_connection2
+
+- hosts: ec2_server_ip
+  remote_user: centos
+  become: True
+  tasks:
+    - name: Restart Nginx service
+      systemd:
+        name: nginx
+        state: restarted
+
+- hosts: local
+  connection: local
+  tasks:
+    - name: Add EC2 to ELB
+      ec2_elb: 
+        state: present
+        ec2_elbs: phpbalancer
+        region: us-west-1
+        instance_id: "{{ item.id }}"
+      with_items: "{{ ec2_server.tagged_instances }}"
+
+
+
