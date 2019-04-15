@@ -22,11 +22,11 @@ boto3 (1.9.130)
 
 Os seguintes componentes foram utilizados/criados
 
-EC2
-ELB
-Security Group
-KeyPair
-Volumes
+EC2  
+ELB  
+Security Group  
+KeyPair  
+Volumes  
 
 # Execução
 
@@ -34,8 +34,8 @@ Após a instalação dos pré-requisitos como o ansible e boto3, copiar a creden
 
 O diretório ficará com a seguinte estrutura:
 
-~/.aws/config
-~/.aws/credentials
+~/.aws/config  
+~/.aws/credentials  
 
 Efetuar o clone deste repositório git e executar o comando a partir da raiz deste diretório:
 
